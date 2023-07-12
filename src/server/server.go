@@ -1,28 +1,49 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
-	hook "github.com/robotn/gohook"
-	"io"
 	"log"
 	"net"
+	"strconv"
 	"sync"
+	"time"
 )
 
+type Event struct {
+	Kind     uint8 `json:"id"`
+	When     time.Time
+	Mask     uint16 `json:"mask"`
+	Reserved uint16 `json:"reserved"`
+
+	Keycode uint16 `json:"keycode"`
+	Rawcode uint16 `json:"rawcode"`
+	Keychar rune   `json:"keychar"`
+
+	Button uint16 `json:"button"`
+	Clicks uint16 `json:"clicks"`
+
+	X int16 `json:"x"`
+	Y int16 `json:"y"`
+
+	Amount    uint16 `json:"amount"`
+	Rotation  int32  `json:"rotation"`
+	Direction uint8  `json:"direction"`
+}
+
 type operateStep struct {
-	clientKey string
-	event     hook.Event
+	ClientKey string
+	Event     Event
 }
 
 type client struct {
-	conn      net.Conn
+	addr      net.UDPAddr
 	clientKey string
 }
 
 type serverControl struct {
 	clientMap   map[string]client
 	operateChan chan operateStep
+	udpConn     net.UDPConn
 }
 
 func InitServer() {
@@ -37,75 +58,118 @@ func InitServer() {
 }
 
 func (control *serverControl) ListenServer() {
-	listener, err := net.Listen("tcp", ":8001")
+
+	//tcpListener, err := net.Listen("tcp", ":8002")
+	//if err != nil {
+	//	log.Println(err)
+	//	return
+	//}
+	//go func() {
+	//	for {
+	//		conn, err := tcpListener.Accept()
+	//		if err != nil {
+	//			log.Println(err)
+	//			continue
+	//		}
+	//		go control.clientLogin(conn)
+	//	}
+	//}()
+
+	udpAddr, err := net.ResolveUDPAddr("udp", ":8001")
 	if err != nil {
 		log.Println(err)
+		return
 	}
-	log.Println("Server is running...")
+
+	listener, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	log.Println(listener.LocalAddr(), "Server is running...")
 	go func() {
 		for {
-			conn, err := listener.Accept()
+			buf := make([]byte, 1024)
+			n, addr, err := listener.ReadFromUDP(buf)
 			if err != nil {
 				log.Println(err)
 			}
-			go control.clientLogin(conn)
+			if n < 200 {
+				log.Println("addr:", addr, string(buf[:n]))
+				go control.clientLogin(addr, string(buf[:n]))
+			}
+			go control.sendDataToOperateChannel(buf[:n])
 
 		}
 	}()
 	go control.sendOperateToClient()
+	control.udpConn = *listener
 }
 
-func (control *serverControl) clientLogin(conn net.Conn) {
-	buffer := make([]byte, 1024)
-	for {
-		_, err := conn.Read(buffer)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			log.Println(err)
-			return
-		}
+func (control *serverControl) sendDataToOperateChannel(data []byte) {
+	step := operateStep{
+		ClientKey: "",
+		Event:     Event{},
 	}
+	json.Unmarshal(data, &step)
+	//log.Println(step)
+	control.operateChan <- step
+}
+
+func (control *serverControl) clientLogin(addr *net.UDPAddr, key string) {
+	//buffer := make([]byte, 1024)
+	//for {
+	//	n, err := conn.Read(buffer)
+	//	if err != nil {
+	//		log.Println(err)
+	//		return
+	//	}
+	//
+	//	if n < 1024 {
+	//		break
+	//	}
+	//}
 	newClient := client{
-		conn:      conn,
-		clientKey: string(buffer),
+		addr:      *addr,
+		clientKey: key,
 	}
-	log.Println(string(buffer), "客户端连接")
+	log.Println(key, "客户端连接")
 	control.clientMap[newClient.clientKey] = newClient
-	controlClient := control.clientMap[newClient.clientKey]
-	go controlClient.readOperateFromClient(control)
+	//controlClient := control.clientMap[newClient.clientKey]
+	//go controlClient.readOperateFromClient(control)
 }
 
-func (operateClient *client) readOperateFromClient(control *serverControl) {
-	for {
-		buffer := bytes.Buffer{}
-		for {
-			buf := make([]byte, 1024)
-			n, err := operateClient.conn.Read(buf)
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				return
-			}
-			buffer.Write(buf[:n])
-			log.Println(string(buf))
-		}
-
-		if buffer.Len() == 0 {
-			continue
-		}
-		step := operateStep{}
-		log.Println("操作", buffer.String())
-		err := json.Unmarshal(buffer.Bytes(), &step)
-		if err != nil {
-			log.Println(err)
-		}
-		control.operateChan <- step
-	}
-
-}
+//func (operateClient *client) readOperateFromClient(control *serverControl) {
+//	for {
+//		buffer := bytes.Buffer{}
+//		for {
+//			buf := make([]byte, 256)
+//			n, err := operateClient.conn.Read(buf)
+//			if err != nil {
+//				log.Println(err)
+//				return
+//			}
+//
+//			buffer.Write(buf[:n])
+//			if n < 256 {
+//				break
+//			}
+//			//log.Println(string(buf))
+//		}
+//
+//		if buffer.Len() == 0 {
+//			continue
+//		}
+//		step := operateStep{}
+//		log.Println("操作", buffer.String())
+//		err := json.Unmarshal(buffer.Bytes(), &step)
+//		if err != nil {
+//			log.Println(err)
+//		}
+//		control.operateChan <- step
+//	}
+//
+//}
 
 func (control *serverControl) sendOperateToClient() {
 	for {
@@ -116,8 +180,26 @@ func (control *serverControl) sendOperateToClient() {
 				log.Println(err)
 				continue
 			}
-			log.Println(string(stepByte))
-			control.clientMap[step.clientKey].conn.Write(stepByte)
+
+			if client, ok := control.clientMap[step.ClientKey]; ok {
+				addr := client.addr
+				raddr := addr.IP.String() + ":" + strconv.Itoa(addr.Port)
+				log.Println("发送地址：", raddr)
+
+				if err != nil {
+
+					log.Println(raddr, err)
+					continue
+				}
+				_, err := control.udpConn.WriteToUDP(stepByte, &client.addr)
+				//_, err = conn.Write(stepByte)
+				if err != nil {
+					log.Println(raddr, err)
+					continue
+				}
+				log.Println("发送：" + string(stepByte))
+			}
+
 		}
 	}
 }
